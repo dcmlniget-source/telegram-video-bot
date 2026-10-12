@@ -1,7 +1,8 @@
 import os
 import random
-import sqlite3
+import json
 import logging
+import requests
 from aiohttp import web
 from telegram import (
     Update,
@@ -20,43 +21,48 @@ from telegram.ext import (
 
 # ----------------- CONFIGURATION -----------------
 BOT_TOKEN = "8894164052:AAHGUTlFdf4lI_4zvH3-2WnOJzjKHLwigak"
-ADMIN_IDS = [123456789]  # Change to your numeric Telegram User ID
+ADMIN_IDS = [8573542782]
 PORT = int(os.environ.get("PORT", 8080))
-WEBAPP_URL = "https://placeholder.onrender.com"  # Update after Render gives your URL
+WEBAPP_URL = "https://placeholder.onrender.com"  # Replace with your actual Render URL
+
+# Firebase Configuration
+FIREBASE_URL = "https://appcreator99-1eb09-default-rtdb.firebaseio.com"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-DB_FILE = "bot_data.db"
+# ----------------- FIREBASE HELPERS -----------------
+def fb_get(endpoint: str):
+    """Fetch data from Firebase Realtime Database."""
+    try:
+        res = requests.get(f"{FIREBASE_URL}/{endpoint}.json", timeout=5)
+        if res.status_code == 200:
+            return res.json()
+    except Exception as e:
+        logging.error(f"Firebase GET error ({endpoint}): {e}")
+    return None
 
-# ----------------- DATABASE SETUP -----------------
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS channels (
-            channel_id TEXT PRIMARY KEY,
-            invite_link TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS videos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_id TEXT UNIQUE
-        )
-    """)
-    conn.commit()
-    conn.close()
+def fb_put(endpoint: str, data):
+    """Write/replace data in Firebase."""
+    try:
+        requests.put(f"{FIREBASE_URL}/{endpoint}.json", json=data, timeout=5)
+    except Exception as e:
+        logging.error(f"Firebase PUT error ({endpoint}): {e}")
 
-def get_db():
-    return sqlite3.connect(DB_FILE)
+def fb_patch(endpoint: str, data):
+    """Update specific keys in Firebase."""
+    try:
+        requests.patch(f"{FIREBASE_URL}/{endpoint}.json", json=data, timeout=5)
+    except Exception as e:
+        logging.error(f"Firebase PATCH error ({endpoint}): {e}")
+
+def fb_delete(endpoint: str):
+    """Delete node from Firebase."""
+    try:
+        requests.delete(f"{FIREBASE_URL}/{endpoint}.json", timeout=5)
+    except Exception as e:
+        logging.error(f"Firebase DELETE error ({endpoint}): {e}")
 
 # ----------------- MONETAG REWARDED AD HTML -----------------
 HTML_CONTENT = """<!DOCTYPE html>
@@ -138,18 +144,14 @@ HTML_CONTENT = """<!DOCTYPE html>
 async def serve_ad_page(request):
     return web.Response(text=HTML_CONTENT, content_type="text/html")
 
-# ----------------- CHANNEL CHECKING -----------------
+# ----------------- CHANNEL MEMBERSHIP CHECK -----------------
 async def check_membership(bot, user_id: int) -> bool:
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT channel_id FROM channels")
-    channels = c.fetchall()
-    conn.close()
-
+    channels = fb_get("channels") or {}
     if not channels:
         return True
 
-    for (ch_id,) in channels:
+    for ch_raw, data in channels.items():
+        ch_id = data.get("channel_id")
         try:
             member = await bot.get_chat_member(chat_id=ch_id, user_id=user_id)
             if member.status in ["left", "kicked"]:
@@ -159,26 +161,20 @@ async def check_membership(bot, user_id: int) -> bool:
     return True
 
 def get_join_keyboard():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT channel_id, invite_link FROM channels")
-    rows = c.fetchall()
-    conn.close()
-
+    channels = fb_get("channels") or {}
     buttons = []
-    for idx, (_, link) in enumerate(rows, 1):
+    idx = 1
+    for _, data in channels.items():
+        link = data.get("invite_link", "")
         buttons.append([InlineKeyboardButton(f"📢 Join Channel {idx}", url=link)])
+        idx += 1
     buttons.append([InlineKeyboardButton("✅ Verify", callback_data="verify_join")])
     return InlineKeyboardMarkup(buttons)
 
-# ----------------- BOT HANDLERS -----------------
+# ----------------- USER HANDLERS -----------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user.id, user.username))
-    conn.commit()
-    conn.close()
+    fb_patch(f"users/{user.id}", {"user_id": user.id, "username": user.username or ""})
 
     is_member = await check_membership(context.bot, user.id)
     if not is_member:
@@ -219,15 +215,12 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.effective_message.web_app_data.data
     if data == "ad_completed":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT file_id FROM videos ORDER BY RANDOM() LIMIT 1")
-        row = c.fetchone()
-        conn.close()
-
-        if row:
+        videos = fb_get("videos") or {}
+        if videos:
+            file_ids = list(videos.values())
+            chosen_video = random.choice(file_ids)
             await update.effective_message.reply_video(
-                video=row[0],
+                video=chosen_video,
                 caption="Here is your video! Enjoy 🎉"
             )
         else:
@@ -256,21 +249,15 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "adm_stats":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM users")
-        total_users = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM videos")
-        total_videos = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM channels")
-        total_channels = c.fetchone()[0]
-        conn.close()
+        users = fb_get("users") or {}
+        videos = fb_get("videos") or {}
+        channels = fb_get("channels") or {}
 
         await query.message.reply_text(
-            f"📊 **Bot Statistics**\n\n"
-            f"• Total Registered Users: `{total_users}`\n"
-            f"• Uploaded Videos: `{total_videos}`\n"
-            f"• Mandatory Channels: `{total_channels}`",
+            f"📊 **Bot Statistics (Firebase)**\n\n"
+            f"• Total Registered Users: `{len(users)}`\n"
+            f"• Uploaded Videos: `{len(videos)}`\n"
+            f"• Mandatory Channels: `{len(channels)}`",
             parse_mode="Markdown"
         )
 
@@ -279,25 +266,16 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Send or forward the video you want to add to the bot.")
 
     elif query.data == "adm_clear_videos":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("DELETE FROM videos")
-        conn.commit()
-        conn.close()
-        await query.message.reply_text("All videos cleared from the library.")
+        fb_delete("videos")
+        await query.message.reply_text("All videos cleared from Firebase.")
 
     elif query.data == "adm_broadcast":
         context.user_data["state"] = "awaiting_broadcast"
         await query.message.reply_text("Send the message you want to broadcast to all users.")
 
     elif query.data == "adm_channels":
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT channel_id, invite_link FROM channels")
-        rows = c.fetchall()
-        conn.close()
-
-        ch_text = "\n".join([f"`{ch[0]}` -> {ch[1]}" for ch in rows]) if rows else "No channels configured."
+        channels = fb_get("channels") or {}
+        ch_text = "\n".join([f"`{data['channel_id']}` -> {data['invite_link']}" for _, data in channels.items()]) if channels else "No channels configured."
         await query.message.reply_text(
             f"📢 **Current Channels:**\n{ch_text}\n\n"
             "• Add: `/addchannel <channel_id_or_@username> <invite_link>`\n"
@@ -317,16 +295,12 @@ async def handle_admin_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE
     if state == "awaiting_broadcast":
         context.user_data["state"] = None
         msg = update.message.text
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM users")
-        recipients = c.fetchall()
-        conn.close()
+        users = fb_get("users") or {}
 
         sent, failed = 0, 0
-        for (uid,) in recipients:
+        for uid_str in users.keys():
             try:
-                await context.bot.send_message(chat_id=uid, text=msg)
+                await context.bot.send_message(chat_id=int(uid_str), text=msg)
                 sent += 1
             except Exception:
                 failed += 1
@@ -338,16 +312,12 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if context.user_data.get("state") == "awaiting_video":
         file_id = update.message.video.file_id
-        conn = get_db()
-        c = conn.cursor()
+        # Push to Firebase videos list
         try:
-            c.execute("INSERT INTO videos (file_id) VALUES (?)", (file_id,))
-            conn.commit()
-            await update.message.reply_text("✅ Video stored successfully!")
-        except sqlite3.IntegrityError:
-            await update.message.reply_text("This video already exists in the catalog.")
-        finally:
-            conn.close()
+            requests.post(f"{FIREBASE_URL}/videos.json", json=file_id, timeout=5)
+            await update.message.reply_text("✅ Video stored successfully in Firebase!")
+        except Exception as e:
+            await update.message.reply_text(f"Error saving video: {e}")
         context.user_data["state"] = None
 
 async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -356,11 +326,8 @@ async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         ch_id = context.args[0]
         link = context.args[1]
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO channels (channel_id, invite_link) VALUES (?, ?)", (ch_id, link))
-        conn.commit()
-        conn.close()
+        safe_key = ch_id.replace("@", "").replace("-", "minus_").replace(".", "_")
+        fb_put(f"channels/{safe_key}", {"channel_id": ch_id, "invite_link": link})
         await update.message.reply_text(f"Added channel: `{ch_id}`", parse_mode="Markdown")
     except IndexError:
         await update.message.reply_text("Usage: `/addchannel <channel_id> <invite_link>`")
@@ -370,11 +337,8 @@ async def del_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         ch_id = context.args[0]
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("DELETE FROM channels WHERE channel_id = ?", (ch_id,))
-        conn.commit()
-        conn.close()
+        safe_key = ch_id.replace("@", "").replace("-", "minus_").replace(".", "_")
+        fb_delete(f"channels/{safe_key}")
         await update.message.reply_text(f"Removed channel: `{ch_id}`", parse_mode="Markdown")
     except IndexError:
         await update.message.reply_text("Usage: `/delchannel <channel_id>`")
@@ -389,8 +353,6 @@ async def run_server():
     await site.start()
 
 def main():
-    init_db()
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # User Handlers
@@ -406,13 +368,12 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_admin_inputs))
 
-    # Start ad web server
+    # Web Server for WebApp
     loop = app.loop
     loop.create_task(run_server())
 
-    print(f"Bot and WebApp Server running on port {PORT}...")
+    print(f"Bot and WebApp Server running on port {PORT} with Firebase Database...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-              
