@@ -1,7 +1,7 @@
 import os
 import random
-import json
 import logging
+import asyncio
 import requests
 from aiohttp import web
 from telegram import (
@@ -23,7 +23,7 @@ from telegram.ext import (
 BOT_TOKEN = "8894164052:AAHGUTlFdf4lI_4zvH3-2WnOJzjKHLwigak"
 ADMIN_IDS = [8573542782]
 PORT = int(os.environ.get("PORT", 8080))
-WEBAPP_URL = "https://placeholder.onrender.com"  # Replace with your actual Render URL
+WEBAPP_URL = "https://placeholder.onrender.com"  # Replace with your actual Render URL when ready
 
 # Firebase Configuration
 FIREBASE_URL = "https://appcreator99-1eb09-default-rtdb.firebaseio.com"
@@ -34,7 +34,6 @@ logging.basicConfig(
 
 # ----------------- FIREBASE HELPERS -----------------
 def fb_get(endpoint: str):
-    """Fetch data from Firebase Realtime Database."""
     try:
         res = requests.get(f"{FIREBASE_URL}/{endpoint}.json", timeout=5)
         if res.status_code == 200:
@@ -44,21 +43,18 @@ def fb_get(endpoint: str):
     return None
 
 def fb_put(endpoint: str, data):
-    """Write/replace data in Firebase."""
     try:
         requests.put(f"{FIREBASE_URL}/{endpoint}.json", json=data, timeout=5)
     except Exception as e:
         logging.error(f"Firebase PUT error ({endpoint}): {e}")
 
 def fb_patch(endpoint: str, data):
-    """Update specific keys in Firebase."""
     try:
         requests.patch(f"{FIREBASE_URL}/{endpoint}.json", json=data, timeout=5)
     except Exception as e:
         logging.error(f"Firebase PATCH error ({endpoint}): {e}")
 
 def fb_delete(endpoint: str):
-    """Delete node from Firebase."""
     try:
         requests.delete(f"{FIREBASE_URL}/{endpoint}.json", timeout=5)
     except Exception as e:
@@ -144,7 +140,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 async def serve_ad_page(request):
     return web.Response(text=HTML_CONTENT, content_type="text/html")
 
-# ----------------- CHANNEL MEMBERSHIP CHECK -----------------
+# ----------------- CHANNEL CHECKING -----------------
 async def check_membership(bot, user_id: int) -> bool:
     channels = fb_get("channels") or {}
     if not channels:
@@ -209,171 +205,4 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.message.reply_text(
             "Verification successful! Click below to unlock your video:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = update.effective_message.web_app_data.data
-    if data == "ad_completed":
-        videos = fb_get("videos") or {}
-        if videos:
-            file_ids = list(videos.values())
-            chosen_video = random.choice(file_ids)
-            await update.effective_message.reply_video(
-                video=chosen_video,
-                caption="Here is your video! Enjoy 🎉"
-            )
-        else:
-            await update.effective_message.reply_text("No videos are currently available in the database.")
-
-# ----------------- ADMIN COMMANDS (/adminTTT) -----------------
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-
-    keyboard = [
-        [InlineKeyboardButton("📊 Stats", callback_data="adm_stats")],
-        [InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast")],
-        [InlineKeyboardButton("➕ Add Video", callback_data="adm_add_video"),
-         InlineKeyboardButton("🗑 Clear All Videos", callback_data="adm_clear_videos")],
-        [InlineKeyboardButton("🔗 Channel Settings", callback_data="adm_channels")]
-    ]
-    await update.message.reply_text("🛠 **Admin Control Panel**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("Unauthorized", show_alert=True)
-        return
-
-    await query.answer()
-
-    if query.data == "adm_stats":
-        users = fb_get("users") or {}
-        videos = fb_get("videos") or {}
-        channels = fb_get("channels") or {}
-
-        await query.message.reply_text(
-            f"📊 **Bot Statistics (Firebase)**\n\n"
-            f"• Total Registered Users: `{len(users)}`\n"
-            f"• Uploaded Videos: `{len(videos)}`\n"
-            f"• Mandatory Channels: `{len(channels)}`",
-            parse_mode="Markdown"
-        )
-
-    elif query.data == "adm_add_video":
-        context.user_data["state"] = "awaiting_video"
-        await query.message.reply_text("Send or forward the video you want to add to the bot.")
-
-    elif query.data == "adm_clear_videos":
-        fb_delete("videos")
-        await query.message.reply_text("All videos cleared from Firebase.")
-
-    elif query.data == "adm_broadcast":
-        context.user_data["state"] = "awaiting_broadcast"
-        await query.message.reply_text("Send the message you want to broadcast to all users.")
-
-    elif query.data == "adm_channels":
-        channels = fb_get("channels") or {}
-        ch_text = "\n".join([f"`{data['channel_id']}` -> {data['invite_link']}" for _, data in channels.items()]) if channels else "No channels configured."
-        await query.message.reply_text(
-            f"📢 **Current Channels:**\n{ch_text}\n\n"
-            "• Add: `/addchannel <channel_id_or_@username> <invite_link>`\n"
-            "• Remove: `/delchannel <channel_id_or_@username>`",
-            parse_mode="Markdown"
-        )
-
-async def handle_admin_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        return
-
-    state = context.user_data.get("state")
-    if not state:
-        return
-
-    if state == "awaiting_broadcast":
-        context.user_data["state"] = None
-        msg = update.message.text
-        users = fb_get("users") or {}
-
-        sent, failed = 0, 0
-        for uid_str in users.keys():
-            try:
-                await context.bot.send_message(chat_id=int(uid_str), text=msg)
-                sent += 1
-            except Exception:
-                failed += 1
-        await update.message.reply_text(f"Broadcast complete.\nDelivered: {sent} | Failed: {failed}")
-
-async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-
-    if context.user_data.get("state") == "awaiting_video":
-        file_id = update.message.video.file_id
-        # Push to Firebase videos list
-        try:
-            requests.post(f"{FIREBASE_URL}/videos.json", json=file_id, timeout=5)
-            await update.message.reply_text("✅ Video stored successfully in Firebase!")
-        except Exception as e:
-            await update.message.reply_text(f"Error saving video: {e}")
-        context.user_data["state"] = None
-
-async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    try:
-        ch_id = context.args[0]
-        link = context.args[1]
-        safe_key = ch_id.replace("@", "").replace("-", "minus_").replace(".", "_")
-        fb_put(f"channels/{safe_key}", {"channel_id": ch_id, "invite_link": link})
-        await update.message.reply_text(f"Added channel: `{ch_id}`", parse_mode="Markdown")
-    except IndexError:
-        await update.message.reply_text("Usage: `/addchannel <channel_id> <invite_link>`")
-
-async def del_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    try:
-        ch_id = context.args[0]
-        safe_key = ch_id.replace("@", "").replace("-", "minus_").replace(".", "_")
-        fb_delete(f"channels/{safe_key}")
-        await update.message.reply_text(f"Removed channel: `{ch_id}`", parse_mode="Markdown")
-    except IndexError:
-        await update.message.reply_text("Usage: `/delchannel <channel_id>`")
-
-# ----------------- MAIN EXECUTION -----------------
-async def run_server():
-    server = web.Application()
-    server.router.add_get("/", serve_ad_page)
-    runner = web.AppRunner(server)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # User Handlers
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CallbackQueryHandler(verify_callback, pattern="^verify_join$"))
-    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
-
-    # Admin Handlers
-    app.add_handler(CommandHandler("adminTTT", admin_panel))
-    app.add_handler(CommandHandler("addchannel", add_channel_cmd))
-    app.add_handler(CommandHandler("delchannel", del_channel_cmd))
-    app.add_handler(CallbackQueryHandler(admin_callbacks, pattern="^adm_"))
-    app.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, handle_video_upload))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_admin_inputs))
-
-    # Web Server for WebApp
-    loop = app.loop
-    loop.create_task(run_server())
-
-    print(f"Bot and WebApp Server running on port {PORT} with Firebase Database...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+            reply_markup=InlineKeyboardMarkup(
