@@ -43,27 +43,4 @@ def fb_put(endpoint: str, data):
     try:
         requests.put(f"{FIREBASE_URL}/{endpoint}.json", json=data, timeout=5)
     except Exception as e:
-        logging.error(f"Firebase PUT error: {e}")
-
-def fb_patch(endpoint: str, data):
-    try:
-        requests.patch(f"{FIREBASE_URL}/{endpoint}.json", json=data, timeout=5)
-    except Exception as e:
-        logging.error(f"Firebase PATCH error: {e}")
-
-def fb_delete(endpoint: str):
-    try:
-        requests.delete(f"{FIREBASE_URL}/{endpoint}.json", timeout=5)
-    except Exception as e:
-        logging.error(f"Firebase DELETE error: {e}")
-
-# ----------------- CHANNEL CHECKING & LAYOUT -----------------
-async def check_membership(bot, user_id: int) -> bool:
-    channels = fb_get("channels") or {}
-    if not channels:
-        return True
-
-    for _, data in channels.items():
-        ch_id = data.get("channel_id")
-        try:
-            member = await bot.get_chat_member(chat_id=
+        
