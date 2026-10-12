@@ -23,7 +23,7 @@ VERCEL_AD_URL = "https://watch-ad-to-unlock-video.vercel.app/"
 FIREBASE_URL = "https://appcreator99-1eb09-default-rtdb.firebaseio.com"
 
 # Force Join Card Banner Photo URL
-BANNER_IMAGE_URL = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800"
+BANNER_IMAGE_URL = "https://i.ibb.co/RTTTK5GV/760137aee5990c82ab3886590d63f744.jpg"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
